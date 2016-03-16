@@ -20,7 +20,9 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <gcrypt.h>
+#include <locale.h>
 
 struct sec_signature {
 	uchar *pSignature;
@@ -52,6 +54,33 @@ static gpg_error_t find_gpg_socket(char *buf, size_t len)
 	return 1;
 }
 
+static gpg_error_t set_option(assuan_context_t *ctx, const char *option, const char *value)
+{
+	char *command;
+	int ret;
+	gpg_error_t err;
+
+	if (value == NULL) {
+		return 0;
+	}
+
+	int len = strlen(option) + strlen(value) + 9;
+	command = malloc(len);
+	if (!command) {
+		return gpg_error_from_errno(errno);
+	}
+
+	ret = snprintf(command, len, "OPTION %s=%s", option, value);
+	if (ret == -1) {
+		free(command);
+		return gpg_error_from_errno(errno);
+	}
+
+	err = assuan_transact(*ctx, command, NULL, NULL, NULL, NULL, NULL, NULL);
+	free(command);
+	return err;
+}
+
 gpg_error_t scd_agent_connect(assuan_context_t *ctx)
 {
 	gpg_error_t err;
@@ -68,12 +97,43 @@ gpg_error_t scd_agent_connect(assuan_context_t *ctx)
 
 	err = assuan_socket_connect(*ctx, gpg_agent_socket_name, ASSUAN_INVALID_PID, 0);
 	if (err) {
-		assuan_release(*ctx);
-		*ctx = NULL;
-		return err;
+		goto err;
 	}
-	
+
+	err = set_option(ctx, "display", getenv("DISPLAY"));
+	if (err) {
+		goto err;
+	}
+	char *tty = getenv("GPG_TTY");
+	if (!tty) {
+		tty = ttyname(0);
+	}
+	if (!tty) {
+		tty = "/dev/tty";
+	}
+	err = set_option(ctx, "ttyname", tty);
+	if (err) {
+		goto err;
+	}
+	err = set_option(ctx, "ttytype", getenv("TERM"));
+	if (err) {
+		goto err;
+	}
+	err = set_option(ctx, "lc-ctype", setlocale(LC_CTYPE, NULL));
+	if (err) {
+		goto err;
+	}
+	err = set_option(ctx, "lc-messages", setlocale(LC_MESSAGES, NULL));
+	if (err) {
+		goto err;
+	}
+
 	return 0;
+
+err:
+	assuan_release(*ctx);
+	*ctx = NULL;
+	return err;
 }
 
 gpg_error_t scd_serialno_openpgp(assuan_context_t ctx)
